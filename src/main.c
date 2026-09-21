@@ -22,12 +22,13 @@
 #define MAX_HOURS (MAX_SECONDS / 3600)
 #define TITLE_HEIGHT 7
 #define TITLE_WIDTH 95
-#define SETUP_HEIGHT (TITLE_HEIGHT + 10)
+#define SETUP_HEIGHT (TITLE_HEIGHT + 13)
 
 typedef struct {
     long long hours;
     long long minutes;
     long long seconds;
+    char title[NOTE_LINE_SIZE];
     char note[NOTE_SIZE];
 } Config;
 
@@ -35,9 +36,11 @@ typedef struct {
     int field;
     long long defaults[3];
     char entered[3][64];
+    char title[NOTE_LINE_SIZE];
     char note[NOTE_SIZE];
     int note_number;
     bool note_blank;
+    char title_choice;
     char note_choice;
     const char *input;
     size_t input_length;
@@ -56,6 +59,9 @@ static const char title[TITLE_HEIGHT][TITLE_WIDTH + 1] = {
 static const char *const number_labels[] = {"Hours", "Minutes", "Seconds"};
 static const char note_heading[] =
     "Note [Click enter to new line, click enter twice to proceed to timer]:";
+static const char title_heading[] = "Title: ";
+static const char title_question[] =
+    "Would you like to add a title? (y/n)?";
 static const char note_question[] =
     "Would you like to add additional notes? (y/n)?";
 
@@ -118,6 +124,19 @@ static int copy_note(char destination[NOTE_SIZE], const char *source)
     }
     memcpy(destination, source, length + 1);
     return 0;
+}
+
+static int set_note(Config *config, const char *title, const char *notes)
+{
+    int title_written = snprintf(config->title, sizeof(config->title), "%s",
+                                 title);
+    int note_written = snprintf(config->note, sizeof(config->note), "%s",
+                                notes);
+
+    return title_written < 0 ||
+           (size_t)title_written >= sizeof(config->title) ||
+           note_written < 0 || (size_t)note_written >= sizeof(config->note) ?
+           -1 : 0;
 }
 
 static int parse_arguments(int argc, char **argv, Config *config)
@@ -220,14 +239,73 @@ static int prompt_number(const char *label, long long maximum, long long *value)
     }
 }
 
+static int prompt_choice(const char *question)
+{
+    char input[64];
+
+    for (;;) {
+        puts(question);
+        if (fgets(input, sizeof(input), stdin) == NULL) {
+            fputc('\n', stderr);
+            return -1;
+        }
+        if (strchr(input, '\n') == NULL) {
+            discard_line();
+        } else {
+            input[strcspn(input, "\n")] = '\0';
+            if (strcmp(input, "y") == 0 || strcmp(input, "Y") == 0) {
+                return 1;
+            }
+            if (strcmp(input, "n") == 0 || strcmp(input, "N") == 0) {
+                return 0;
+            }
+        }
+        fprintf(stderr, "Please enter y or n.\n");
+    }
+}
+
 static int prompt_notes(Config *config)
 {
+    char title[NOTE_LINE_SIZE] = "";
     char note[NOTE_SIZE] = "";
     char input[NOTE_LINE_SIZE];
     size_t used = 0;
     int number = 1;
     bool blank = false;
+    int choice = prompt_choice(title_question);
 
+    if (choice == -1) {
+        return -1;
+    }
+    if (choice == 1) {
+        for (;;) {
+            fputs(title_heading, stdout);
+            fflush(stdout);
+            if (fgets(title, sizeof(title), stdin) == NULL) {
+                fputc('\n', stderr);
+                return -1;
+            }
+            if (strchr(title, '\n') == NULL) {
+                discard_line();
+                fprintf(stderr, "Title is too long (maximum %d bytes).\n",
+                        NOTE_LINE_SIZE - 2);
+                continue;
+            }
+            title[strcspn(title, "\n")] = '\0';
+            if (title[0] != '\0') {
+                break;
+            }
+            fprintf(stderr, "Title cannot be empty.\n");
+        }
+    }
+
+    choice = prompt_choice(note_question);
+    if (choice == -1) {
+        return -1;
+    }
+    if (choice == 0) {
+        return set_note(config, title, "");
+    }
     puts(note_heading);
     for (;;) {
         printf(blank ? "   " : "%d. ", number);
@@ -245,7 +323,12 @@ static int prompt_notes(Config *config)
         input[strcspn(input, "\n")] = '\0';
         if (input[0] == '\0') {
             if (blank) {
-                memcpy(config->note, note, used + 1);
+                if (set_note(config, title, note) == -1) {
+                    fprintf(stderr,
+                            "Title and notes are too long (maximum %d bytes).\n",
+                            NOTE_SIZE - 1);
+                    return -1;
+                }
                 return 0;
             }
             blank = true;
@@ -266,6 +349,231 @@ static int prompt_notes(Config *config)
             used += (size_t)written;
         }
         ++number;
+    }
+}
+
+static int rule_count(const char *rules)
+{
+    int count = *rules == '\0' ? 0 : 1;
+
+    for (; *rules != '\0'; ++rules) {
+        count += *rules == '\n';
+    }
+    return count;
+}
+
+static bool find_rule(const char *rules, int number, const char **start,
+                      const char **end, const char **value)
+{
+    const char *line = rules;
+    const char *prefix;
+    int current;
+
+    for (current = 1; current < number; ++current) {
+        line = strchr(line, '\n');
+        if (line == NULL) {
+            return false;
+        }
+        ++line;
+    }
+    if (*line == '\0') {
+        return false;
+    }
+    *start = line;
+    *end = strchr(line, '\n');
+    if (*end == NULL) {
+        *end = line + strlen(line);
+    }
+    prefix = line;
+    while (prefix < *end && *prefix >= '0' && *prefix <= '9') {
+        ++prefix;
+    }
+    *value = prefix > line && prefix + 1 < *end &&
+             prefix[0] == '.' && prefix[1] == ' ' ? prefix + 2 : line;
+    return true;
+}
+
+static int prompt_rule_list(char rules[NOTE_SIZE], int number)
+{
+    char input[NOTE_LINE_SIZE];
+    size_t used = strlen(rules);
+    bool blank = false;
+
+    for (;;) {
+        if (blank) {
+            fputs("   ", stdout);
+        } else {
+            printf("[Rule %d]: ", number);
+        }
+        fflush(stdout);
+        if (fgets(input, sizeof(input), stdin) == NULL) {
+            fputc('\n', stderr);
+            return -1;
+        }
+        if (strchr(input, '\n') == NULL) {
+            discard_line();
+            fprintf(stderr, "Rule is too long (maximum %d bytes).\n",
+                    NOTE_LINE_SIZE - 2);
+            continue;
+        }
+        input[strcspn(input, "\n")] = '\0';
+        if (input[0] == '\0') {
+            if (blank) {
+                return 0;
+            }
+            blank = true;
+            continue;
+        }
+
+        blank = false;
+        {
+            int written = snprintf(rules + used, NOTE_SIZE - used,
+                                   "%s%d. %s", used == 0 ? "" : "\n",
+                                   number, input);
+
+            if (written < 0 || (size_t)written >= NOTE_SIZE - used) {
+                fprintf(stderr, "Rules are too long (maximum %d bytes).\n",
+                        NOTE_SIZE - 1);
+                return -1;
+            }
+            used += (size_t)written;
+        }
+        ++number;
+    }
+}
+
+static int edit_title_and_notes(Config *config)
+{
+    char title[NOTE_LINE_SIZE];
+    char note[NOTE_SIZE];
+    char input[NOTE_LINE_SIZE];
+
+    memcpy(title, config->title, strlen(config->title) + 1);
+    memcpy(note, config->note, strlen(config->note) + 1);
+    for (;;) {
+        fputs("Title [leave blank to keep current]: ", stdout);
+        fflush(stdout);
+        if (fgets(input, sizeof(input), stdin) == NULL) {
+            fputc('\n', stderr);
+            return -1;
+        }
+        if (strchr(input, '\n') == NULL) {
+            discard_line();
+            fprintf(stderr, "Title is too long (maximum %d bytes).\n",
+                    NOTE_LINE_SIZE - 2);
+            continue;
+        }
+        input[strcspn(input, "\n")] = '\0';
+        if (input[0] != '\0') {
+            memcpy(title, input, strlen(input) + 1);
+        }
+        break;
+    }
+
+    puts("Rules:");
+    puts("1. Add new rules");
+    puts("2. Edit existing rules");
+    puts("3. Make new rules");
+    puts("4. Keep existing rules");
+    for (;;) {
+        long long option;
+
+        fputs("\nOpt(Default=4): ", stdout);
+        fflush(stdout);
+        if (fgets(input, sizeof(input), stdin) == NULL) {
+            fputc('\n', stderr);
+            return -1;
+        }
+        if (strchr(input, '\n') == NULL) {
+            discard_line();
+            fprintf(stderr, "Rule is too long (maximum %d bytes).\n",
+                    NOTE_LINE_SIZE - 2);
+            continue;
+        }
+        input[strcspn(input, "\n")] = '\0';
+        if (input[0] == '\0' || strcmp(input, "4") == 0) {
+            return set_note(config, title, note);
+        }
+        if (!parse_number_value(input, 3, &option) || option == 0) {
+            fprintf(stderr, "Please enter 1-4.\n");
+            continue;
+        }
+        if (option == 1) {
+            int count = rule_count(note);
+
+            if (prompt_rule_list(note, count + 1) == -1) {
+                return -1;
+            }
+            return set_note(config, title, note);
+        }
+        if (option == 2) {
+            int count = rule_count(note);
+            long long number;
+            const char *start;
+            const char *end;
+            const char *value;
+
+            if (count == 0) {
+                fprintf(stderr, "There are no existing rules to edit.\n");
+                continue;
+            }
+            for (;;) {
+                fputs("Which rule's number to change: ", stdout);
+                fflush(stdout);
+                if (fgets(input, sizeof(input), stdin) == NULL) {
+                    fputc('\n', stderr);
+                    return -1;
+                }
+                if (strchr(input, '\n') == NULL) {
+                    discard_line();
+                    fprintf(stderr, "Input is too long.\n");
+                    continue;
+                }
+                input[strcspn(input, "\n")] = '\0';
+                if (parse_number_value(input, count, &number) && number > 0 &&
+                    find_rule(note, (int)number, &start, &end, &value)) {
+                    break;
+                }
+                fprintf(stderr, "Rule number '%s' does not exist.\n", input);
+            }
+            printf("Current value: %.*s\n", (int)(end - value), value);
+            fputs("New Value [leave blank to keep current]: ", stdout);
+            fflush(stdout);
+            if (fgets(input, sizeof(input), stdin) == NULL) {
+                fputc('\n', stderr);
+                return -1;
+            }
+            if (strchr(input, '\n') == NULL) {
+                discard_line();
+                fprintf(stderr, "Rule is too long (maximum %d bytes).\n",
+                        NOTE_LINE_SIZE - 2);
+                return -1;
+            }
+            input[strcspn(input, "\n")] = '\0';
+            if (input[0] != '\0') {
+                char updated[NOTE_SIZE];
+                int written = snprintf(updated, sizeof(updated),
+                                       "%.*s%lld. %s%s",
+                                       (int)(start - note), note, number,
+                                       input, end);
+
+                if (written < 0 || (size_t)written >= sizeof(updated)) {
+                    fprintf(stderr,
+                            "Rules are too long (maximum %d bytes).\n",
+                            NOTE_SIZE - 1);
+                    return -1;
+                }
+                memcpy(note, updated, (size_t)written + 1);
+            }
+            return set_note(config, title, note);
+        }
+        if (option == 3) {
+            note[0] = '\0';
+            if (prompt_rule_list(note, 1) == -1) {
+                return -1;
+            }
+            return set_note(config, title, note);
+        }
     }
 }
 
@@ -303,27 +611,7 @@ static int prompt_config(Config *config, long long *total)
             return -1;
         }
         if (total_seconds(config, total) == 0) {
-            char input[64];
-
-            for (;;) {
-                puts(note_question);
-                if (fgets(input, sizeof(input), stdin) == NULL) {
-                    fputc('\n', stderr);
-                    return -1;
-                }
-                if (strchr(input, '\n') == NULL) {
-                    discard_line();
-                } else {
-                    input[strcspn(input, "\n")] = '\0';
-                    if (strcmp(input, "y") == 0 || strcmp(input, "Y") == 0) {
-                        return prompt_notes(config);
-                    }
-                    if (strcmp(input, "n") == 0 || strcmp(input, "N") == 0) {
-                        return 0;
-                    }
-                }
-                fprintf(stderr, "Please enter y or n.\n");
-            }
+            return prompt_notes(config);
         }
     }
 }
@@ -418,59 +706,94 @@ static bool draw_setup(const Setup *setup)
         }
     }
 
-    draw_text(form_y + 3, form_x, note_question, columns);
+    draw_text(form_y + 3, form_x, title_question, columns);
     if (setup->field == 3) {
         draw_text(form_y + 4, form_x, setup->input, columns);
         cursor_row = form_y + 4;
         cursor_column = form_x + (int)setup->input_length;
-    } else if (setup->field == 4) {
-        const char *line = setup->note;
-        int total_note_lines = completed_note_lines + 1;
-        char choice[] = {setup->note_choice, '\0'};
+    } else if (setup->field >= 4) {
+        char choice[] = {setup->title_choice, '\0'};
+        int next_row = form_y + 5;
 
         draw_text(form_y + 4, form_x, choice, columns);
-        draw_text(form_y + 5, form_x, note_heading, columns);
-        note_y = form_y + 6;
-        visible_note_lines = rows - note_y - 1;
-        skipped_note_lines = total_note_lines > visible_note_lines ?
-                             total_note_lines - visible_note_lines : 0;
-        for (index = 0; index < skipped_note_lines; ++index) {
-            line = strchr(line, '\n');
-            if (line != NULL) {
-                ++line;
+        if (setup->title_choice == 'y' || setup->title_choice == 'Y') {
+            int heading_length = (int)(sizeof(title_heading) - 1);
+            int available = columns - form_x - heading_length;
+            const char *value = setup->field == 4 ? setup->input :
+                                                   setup->title;
+            size_t value_length = setup->field == 4 ? setup->input_length :
+                                                      strlen(setup->title);
+            size_t offset = value_length >= (size_t)available ?
+                            value_length - (size_t)available + 1 : 0;
+
+            draw_text(next_row, form_x, title_heading, columns);
+            mvaddnstr(next_row, form_x + heading_length,
+                      value + offset, available - 1);
+            if (setup->field == 4) {
+                cursor_row = next_row;
+                cursor_column = form_x + heading_length +
+                                (int)(value_length - offset);
             }
+            ++next_row;
         }
-        row = note_y;
-        for (index = skipped_note_lines;
-             index < completed_note_lines && line != NULL; ++index) {
-            const char *end = strchr(line, '\n');
-            size_t length = end == NULL ? strlen(line) : (size_t)(end - line);
+        if (setup->field >= 5) {
+            draw_text(next_row, form_x, note_question, columns);
+            if (setup->field == 5) {
+                draw_text(next_row + 1, form_x, setup->input, columns);
+                cursor_row = next_row + 1;
+                cursor_column = form_x + (int)setup->input_length;
+            } else if (setup->field == 6) {
+                const char *line = setup->note;
+                int total_note_lines = completed_note_lines + 1;
+                char note_choice[] = {setup->note_choice, '\0'};
 
-            mvaddnstr(row++, form_x, line,
-                      length < (size_t)(columns - form_x) ? (int)length :
-                                                           columns - form_x);
-            line = end == NULL ? NULL : end + 1;
-        }
-        {
-            char prefix[32];
-            int prefix_length = setup->note_blank ?
-                                snprintf(prefix, sizeof(prefix), "   ") :
-                                snprintf(prefix, sizeof(prefix), "%d. ",
-                                         setup->note_number);
-            int available = columns - form_x - prefix_length;
-            size_t offset = 0;
-
-            draw_text(row, form_x, prefix, columns);
-            if (available > 0) {
-                if (setup->input_length >= (size_t)available) {
-                    offset = setup->input_length - (size_t)available + 1;
+                draw_text(next_row + 1, form_x, note_choice, columns);
+                draw_text(next_row + 2, form_x, note_heading, columns);
+                note_y = next_row + 3;
+                visible_note_lines = rows - note_y - 1;
+                skipped_note_lines = total_note_lines > visible_note_lines ?
+                                     total_note_lines - visible_note_lines : 0;
+                for (index = 0; index < skipped_note_lines; ++index) {
+                    line = strchr(line, '\n');
+                    if (line != NULL) {
+                        ++line;
+                    }
                 }
-                mvaddnstr(row, form_x + prefix_length,
-                          setup->input + offset, available - 1);
+                row = note_y;
+                for (index = skipped_note_lines;
+                     index < completed_note_lines && line != NULL; ++index) {
+                    const char *end = strchr(line, '\n');
+                    size_t length = end == NULL ? strlen(line) :
+                                    (size_t)(end - line);
+
+                    mvaddnstr(row++, form_x, line,
+                              length < (size_t)(columns - form_x) ?
+                              (int)length : columns - form_x);
+                    line = end == NULL ? NULL : end + 1;
+                }
+                {
+                    char prefix[32];
+                    int prefix_length = setup->note_blank ?
+                                        snprintf(prefix, sizeof(prefix), "   ") :
+                                        snprintf(prefix, sizeof(prefix), "%d. ",
+                                                 setup->note_number);
+                    int available = columns - form_x - prefix_length;
+                    size_t offset = 0;
+
+                    draw_text(row, form_x, prefix, columns);
+                    if (available > 0) {
+                        if (setup->input_length >= (size_t)available) {
+                            offset = setup->input_length -
+                                     (size_t)available + 1;
+                        }
+                        mvaddnstr(row, form_x + prefix_length,
+                                  setup->input + offset, available - 1);
+                    }
+                    cursor_row = row;
+                    cursor_column = form_x + prefix_length +
+                                    (int)(setup->input_length - offset);
+                }
             }
-            cursor_row = row;
-            cursor_column = form_x + prefix_length +
-                            (int)(setup->input_length - offset);
         }
     }
 
@@ -525,6 +848,29 @@ static int read_setup_line(Setup *setup, char *input, size_t maximum)
                 ++overflow;
             }
         }
+    }
+}
+
+static int read_setup_choice(Setup *setup, int field, char *choice)
+{
+    char input[2];
+
+    setup->field = field;
+    for (;;) {
+        int input_result = read_setup_line(setup, input, sizeof(input) - 1);
+
+        if (input_result == -1) {
+            return -1;
+        }
+        if (input_result == 0 &&
+            (input[0] == 'y' || input[0] == 'Y' ||
+             input[0] == 'n' || input[0] == 'N') && input[1] == '\0') {
+            *choice = input[0];
+            setup->message[0] = '\0';
+            return 0;
+        }
+        (void)snprintf(setup->message, sizeof(setup->message),
+                       "Please enter y or n.");
     }
 }
 
@@ -584,29 +930,48 @@ static int prompt_config_screen(Config *config, long long *total)
         }
     }
 
-    setup.field = 3;
-    for (;;) {
-        char input[2];
-        int input_result = read_setup_line(&setup, input, sizeof(input) - 1);
+    if (read_setup_choice(&setup, 3, &setup.title_choice) == -1) {
+        return -1;
+    }
 
-        if (input_result == -1) {
-            return -1;
-        }
-        if (input_result == 0 && (input[0] == 'y' || input[0] == 'Y') &&
-            input[1] == '\0') {
-            setup.note_choice = input[0];
+    if (setup.title_choice == 'y' || setup.title_choice == 'Y') {
+        setup.field = 4;
+        for (;;) {
+            char input[NOTE_LINE_SIZE];
+            int input_result = read_setup_line(&setup, input,
+                                               sizeof(input) - 2);
+
+            if (input_result == -1) {
+                return -1;
+            }
+            if (input_result == 1) {
+                (void)snprintf(setup.message, sizeof(setup.message),
+                               "Title is too long (maximum %d bytes).",
+                               NOTE_LINE_SIZE - 2);
+                continue;
+            }
+            if (input[0] == '\0') {
+                (void)snprintf(setup.message, sizeof(setup.message),
+                               "Title cannot be empty.");
+                continue;
+            }
+            memcpy(setup.title, input, strlen(input) + 1);
             setup.message[0] = '\0';
             break;
         }
-        if (input_result == 0 && (input[0] == 'n' || input[0] == 'N') &&
-            input[1] == '\0') {
-            goto done;
-        }
-        (void)snprintf(setup.message, sizeof(setup.message),
-                       "Please enter y or n.");
     }
 
-    setup.field = 4;
+    if (read_setup_choice(&setup, 5, &setup.note_choice) == -1) {
+        return -1;
+    }
+    if (setup.note_choice == 'n' || setup.note_choice == 'N') {
+        if (set_note(config, setup.title, "") == -1) {
+            return -2;
+        }
+        goto done;
+    }
+
+    setup.field = 6;
     for (;;) {
         char input[NOTE_LINE_SIZE];
         int input_result = read_setup_line(&setup, input,
@@ -623,7 +988,9 @@ static int prompt_config_screen(Config *config, long long *total)
         }
         if (input[0] == '\0') {
             if (setup.note_blank) {
-                memcpy(config->note, setup.note, strlen(setup.note) + 1);
+                if (set_note(config, setup.title, setup.note) == -1) {
+                    return -2;
+                }
                 break;
             }
             setup.note_blank = true;
@@ -664,7 +1031,7 @@ static int install_signal_handlers(void)
 
 int main(int argc, char **argv)
 {
-    Config config = {0, 0, 0, ""};
+    Config config = {0};
     struct timespec clock_check;
     long long duration;
     Timer timer;
@@ -698,7 +1065,8 @@ int main(int argc, char **argv)
         if (result != 0) {
             display_shutdown();
             if (result == -2) {
-                fprintf(stderr, "Notes are too long (maximum %d bytes).\n",
+                fprintf(stderr,
+                        "Title and notes are too long (maximum %d bytes).\n",
                         NOTE_SIZE - 1);
             }
             return EXIT_FAILURE;
@@ -715,7 +1083,7 @@ int main(int argc, char **argv)
     while (!quit && !interrupted) {
         int key;
 
-        display_draw(&timer, config.note);
+        display_draw(&timer, config.title, config.note);
         if (timer.finished && !bell_rung) {
             beep();
             bell_rung = true;
@@ -736,9 +1104,11 @@ int main(int argc, char **argv)
             case 'e':
             case 'E':
                 display_shutdown();
-                printf("Current note:\n%s\n\nThe timer is still running.\n",
+                printf("Current title: %s\nCurrent rules:\n%s\n\n"
+                       "The timer is still running.\n",
+                       config.title[0] == '\0' ? "(none)" : config.title,
                        config.note[0] == '\0' ? "(none)" : config.note);
-                if (prompt_notes(&config) == -1) {
+                if (edit_title_and_notes(&config) == -1) {
                     return EXIT_FAILURE;
                 }
                 if (display_init() == -1) {

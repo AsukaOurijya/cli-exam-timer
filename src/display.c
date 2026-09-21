@@ -256,10 +256,10 @@ int display_init(void)
     return 0;
 }
 
-void display_draw(Timer *timer, const char *note)
+void display_draw(Timer *timer, const char *title, const char *note)
 {
     static const char controls[] =
-        "[SPACE/P] Pause   [E] Edit note   [R] Reset   [Q] Quit";
+        "[SPACE/P] Pause   [E] Edit title/rules   [R] Reset   [Q] Quit";
     long long remaining = timer_remaining_seconds(timer);
     long long hours = remaining / 3600;
     int minutes = (int)(remaining / 60 % 60);
@@ -294,7 +294,7 @@ void display_draw(Timer *timer, const char *note)
     erase();
     width = clock_width(clock_text);
     box_width = width + 4;
-    note_lines = note_line_count(note);
+    note_lines = (*title == '\0' ? 0 : 1) + note_line_count(note);
     layout_height = 20 + note_lines;
     track_width = columns - 16;
 
@@ -313,7 +313,10 @@ void display_draw(Timer *timer, const char *note)
     draw_border(top, (columns - box_width) / 2, 9, box_width);
     draw_clock(top + 1, (columns - width) / 2, clock_text);
     draw_centered(top + 10, date, columns, A_BOLD);
-    draw_notes(top + 12, note, columns);
+    if (*title != '\0') {
+        draw_centered(top + 12, title, columns, A_BOLD);
+    }
+    draw_notes(top + 12 + (*title == '\0' ? 0 : 1), note, columns);
     status_row = top + 13 + note_lines;
 
     if (timer->finished) {

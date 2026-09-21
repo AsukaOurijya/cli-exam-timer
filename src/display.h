@@ -4,7 +4,7 @@
 #include "timer.h"
 
 int display_init(void);
-void display_draw(Timer *timer, const char *note);
+void display_draw(Timer *timer, const char *title, const char *note);
 void display_shutdown(void);
 
 #endif

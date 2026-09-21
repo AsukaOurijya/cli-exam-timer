@@ -83,9 +83,11 @@ make
 1. Run `./exam-timer` in the terminal for your operating system.
 2. Enter the hours, minutes, and seconds. Press Enter to accept a displayed
    default. The timer asks again if all three values are `00`.
-3. Enter each note and press Enter. Notes are numbered automatically.
-4. On an empty note line, press Enter twice to start the countdown.
-5. Use the controls below while the timer is running.
+3. Choose whether to add a title, then whether to add numbered notes.
+4. Enter each note and press Enter. On an empty note line, press Enter twice
+   to start the countdown.
+5. Use the controls below while the timer is running. Editing asks directly
+   for a title and rules; leave either blank to keep its current value.
 
 ### Command-line setup
 
@@ -107,7 +109,7 @@ Run `./exam-timer --help` to list all options.
 ## Controls
 
 - `SPACE` or `P`: pause or resume
-- `E`: replace the note while the countdown keeps running
+- `E`: edit the title and rules while the countdown keeps running
 - `R`: reset to the configured duration
 - `Q`: quit
 
