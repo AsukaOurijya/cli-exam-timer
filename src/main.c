@@ -183,6 +183,7 @@ static int prompt_notes(Config *config)
 {
     static const char heading[] =
         "Note [Click enter to new line, click enter twice to proceed to timer]:";
+    char note[NOTE_SIZE] = "";
     char input[NOTE_LINE_SIZE];
     size_t used = 0;
     int number = 1;
@@ -205,6 +206,7 @@ static int prompt_notes(Config *config)
         input[strcspn(input, "\n")] = '\0';
         if (input[0] == '\0') {
             if (blank) {
+                memcpy(config->note, note, used + 1);
                 return 0;
             }
             blank = true;
@@ -213,7 +215,7 @@ static int prompt_notes(Config *config)
 
         blank = false;
         {
-            int written = snprintf(config->note + used, NOTE_SIZE - used,
+            int written = snprintf(note + used, NOTE_SIZE - used,
                                    "%s%d. %s", used == 0 ? "" : "\n",
                                    number, input);
 
@@ -321,6 +323,19 @@ int main(int argc, char **argv)
             case 'R':
                 timer_reset(&timer);
                 bell_rung = false;
+                break;
+            case 'e':
+            case 'E':
+                display_shutdown();
+                printf("Current note:\n%s\n\nThe timer is still running.\n",
+                       config.note[0] == '\0' ? "(none)" : config.note);
+                if (prompt_notes(&config) == -1) {
+                    return EXIT_FAILURE;
+                }
+                if (display_init() == -1) {
+                    fprintf(stderr, "Could not reinitialize ncurses.\n");
+                    return EXIT_FAILURE;
+                }
                 break;
             case 'q':
             case 'Q':

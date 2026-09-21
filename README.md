@@ -107,6 +107,7 @@ Run `./exam-timer --help` to list all options.
 ## Controls
 
 - `SPACE` or `P`: pause or resume
+- `E`: replace the note while the countdown keeps running
 - `R`: reset to the configured duration
 - `Q`: quit
 
