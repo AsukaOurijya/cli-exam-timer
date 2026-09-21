@@ -42,6 +42,21 @@ long long timer_remaining_seconds(Timer *timer)
                        NS_PER_SECOND);
 }
 
+double timer_progress(const Timer *timer)
+{
+    double progress;
+
+    if (timer->initial_ns <= 0) {
+        return 0.0;
+    }
+    progress = (double)(timer->initial_ns - timer->remaining_ns) /
+               (double)timer->initial_ns;
+    if (progress < 0.0) {
+        return 0.0;
+    }
+    return progress > 1.0 ? 1.0 : progress;
+}
+
 void timer_toggle_pause(Timer *timer)
 {
     if (timer->finished) {

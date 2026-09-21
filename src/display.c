@@ -13,9 +13,45 @@ enum {
     COLOR_FINISHED
 };
 
+#define CAR_FRAME_COUNT 4
+#define CAR_HEIGHT 5
+#define CAR_WIDTH 24
+#define CAR_FRAME_NS INT64_C(66666667)
+
 static bool colors_enabled;
 static bool was_finished;
 static struct timespec blink_started;
+
+static const char car_frames[CAR_FRAME_COUNT][CAR_HEIGHT][CAR_WIDTH + 1] = {
+    {
+        "        _______         ",
+        "   ____/|_||_\\`.__      ",
+        "  / _          _   \\___ ",
+        " |____________________/>",
+        "    (O)          (O)    "
+    },
+    {
+        "        _______         ",
+        "   ____/|_||_\\`.__      ",
+        "  / _          _   \\___ ",
+        ".|____________________/>",
+        "    (O)          (O)    "
+    },
+    {
+        "        _______         ",
+        "   ____/|_||_\\`.__      ",
+        "  / _          _   \\___ ",
+        "-|____________________/>",
+        "    (O)          (O)    "
+    },
+    {
+        "        _______         ",
+        "   ____/|_||_\\`.__      ",
+        "  / _          _   \\___ ",
+        "'|____________________/>",
+        "    (O)          (O)    "
+    }
+};
 
 typedef struct {
     int width;
@@ -154,6 +190,50 @@ static void draw_border(int row, int column, int height, int width)
     mvaddch(row + height - 1, column + width - 1, ACS_LRCORNER);
 }
 
+static int car_frame(const Timer *timer)
+{
+    int64_t elapsed = timer->initial_ns - timer->remaining_ns;
+
+    if (elapsed <= 0) {
+        return 0;
+    }
+    return (int)(elapsed / CAR_FRAME_NS % CAR_FRAME_COUNT);
+}
+
+static void draw_car(int row, int column, int frame)
+{
+    attr_t attrs = A_BOLD |
+                   (colors_enabled ? COLOR_PAIR(COLOR_PAUSED) : A_NORMAL);
+    int y;
+
+    attron(attrs);
+    for (y = 0; y < CAR_HEIGHT; ++y) {
+        mvaddnstr(row + y, column, car_frames[frame][y], CAR_WIDTH);
+    }
+    attroff(attrs);
+}
+
+static void draw_road(int row, int left, int track_start, int track_width)
+{
+    attr_t start_attrs = A_BOLD |
+                         (colors_enabled ? COLOR_PAIR(COLOR_TIMER) : A_NORMAL);
+    attr_t finish_attrs = A_BOLD |
+                          (colors_enabled ? COLOR_PAIR(COLOR_FINISHED) :
+                                            A_NORMAL);
+
+    attron(start_attrs);
+    mvaddstr(row, left, "START");
+    attroff(start_attrs);
+    mvaddch(row, left + 6, '|');
+    attron(A_DIM);
+    mvhline(row, track_start, '=', track_width);
+    attroff(A_DIM);
+    mvaddch(row, track_start + track_width, '|');
+    attron(finish_attrs);
+    mvaddstr(row, track_start + track_width + 2, "FINISH");
+    attroff(finish_attrs);
+}
+
 int display_init(void)
 {
     if (initscr() == NULL) {
@@ -192,6 +272,14 @@ void display_draw(Timer *timer, const char *note)
     int note_lines;
     int layout_height;
     int top;
+    int status_row;
+    int car_row;
+    int road_row;
+    int track_width;
+    int track_left;
+    int track_start;
+    int available_distance;
+    int car_column;
     time_t now = time(NULL);
     struct tm local;
 
@@ -206,10 +294,11 @@ void display_draw(Timer *timer, const char *note)
     width = clock_width(clock_text);
     box_width = width + 4;
     note_lines = note_line_count(note);
-    layout_height = 14 + note_lines;
+    layout_height = 20 + note_lines;
+    track_width = columns - 16;
 
-    if (rows < 19 || rows < layout_height + 3 || columns < box_width ||
-        columns < (int)strlen(controls)) {
+    if (rows < layout_height + 3 || columns < box_width ||
+        columns < (int)strlen(controls) || track_width < CAR_WIDTH) {
         draw_centered(rows / 2 - 1, "Terminal too small.", columns, A_BOLD);
         if (rows / 2 < rows) {
             draw_centered(rows / 2, "Please resize the terminal.", columns,
@@ -219,27 +308,38 @@ void display_draw(Timer *timer, const char *note)
         return;
     }
 
-    top = (rows - layout_height) / 2;
+    top = (rows - 2 - layout_height) / 2;
     draw_border(top, (columns - box_width) / 2, 9, box_width);
     draw_clock(top + 1, (columns - width) / 2, clock_text);
     draw_centered(top + 10, date, columns, A_BOLD);
     draw_notes(top + 12, note, columns);
+    status_row = top + 13 + note_lines;
 
     if (timer->finished) {
         if (show_finished_title()) {
-            draw_centered(top + 13 + note_lines, "TIME'S UP!", columns,
+            draw_centered(status_row, "TIME'S UP!", columns,
                           A_BOLD |
                           (colors_enabled ? COLOR_PAIR(COLOR_FINISHED) :
                                             A_NORMAL));
         }
     } else if (timer->paused) {
         was_finished = false;
-        draw_centered(top + 13 + note_lines, "PAUSED", columns,
+        draw_centered(status_row, "PAUSED", columns,
                       A_BOLD | (colors_enabled ? COLOR_PAIR(COLOR_PAUSED) :
                                 A_NORMAL));
     } else {
         was_finished = false;
     }
+
+    car_row = status_row + 1;
+    road_row = car_row + CAR_HEIGHT;
+    track_left = (columns - (track_width + 15)) / 2;
+    track_start = track_left + 7;
+    available_distance = track_width - CAR_WIDTH;
+    car_column = track_start +
+                 (int)(timer_progress(timer) * available_distance + 0.5);
+    draw_car(car_row, car_column, car_frame(timer));
+    draw_road(road_row, track_left, track_start, track_width);
 
     draw_centered(rows - 2, controls, columns, A_DIM);
     refresh();

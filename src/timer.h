@@ -15,6 +15,7 @@ typedef struct {
 void timer_init(Timer *timer, long long seconds);
 void timer_update(Timer *timer);
 long long timer_remaining_seconds(Timer *timer);
+double timer_progress(const Timer *timer);
 void timer_toggle_pause(Timer *timer);
 void timer_reset(Timer *timer);
 
