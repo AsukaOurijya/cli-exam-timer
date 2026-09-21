@@ -17,7 +17,16 @@ static void wait_ms(long milliseconds)
 int main(void)
 {
     Timer timer;
+    Timer progress = {100, 100, 0, false, false};
     long long paused_at;
+
+    assert(timer_progress(&progress) == 0.0);
+    progress.remaining_ns = 50;
+    assert(timer_progress(&progress) == 0.5);
+    progress.remaining_ns = 0;
+    assert(timer_progress(&progress) == 1.0);
+    progress.remaining_ns = -1;
+    assert(timer_progress(&progress) == 1.0);
 
     timer_init(&timer, 1);
     assert(timer_remaining_seconds(&timer) == 1);
