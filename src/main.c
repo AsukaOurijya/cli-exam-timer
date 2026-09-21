@@ -14,11 +14,15 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #define NOTE_SIZE 4096
 #define NOTE_LINE_SIZE 512
 #define MAX_SECONDS (INT64_MAX / INT64_C(1000000000))
 #define MAX_HOURS (MAX_SECONDS / 3600)
+#define TITLE_HEIGHT 7
+#define TITLE_WIDTH 95
+#define SETUP_HEIGHT (TITLE_HEIGHT + 8)
 
 typedef struct {
     long long hours;
@@ -26,6 +30,31 @@ typedef struct {
     long long seconds;
     char note[NOTE_SIZE];
 } Config;
+
+typedef struct {
+    int field;
+    long long defaults[3];
+    char entered[3][64];
+    char note[NOTE_SIZE];
+    int note_number;
+    bool note_blank;
+    const char *input;
+    size_t input_length;
+    char message[NOTE_LINE_SIZE + 80];
+} Setup;
+
+static const char title[TITLE_HEIGHT][TITLE_WIDTH + 1] = {
+    "    __  _      ____        ___  __ __   ____  ___ ___      ______  ____  ___ ___    ___  ____  ",
+    "   /  ]| T    l    j      /  _]|  T  T /    T|   T   T    |      Tl    j|   T   T  /  _]|    \\",
+    "  /  / | |     |  T      /  [_ |  |  |Y  o  || _   _ |    |      | |  T | _   _ | /  [_ |  D  )",
+    " /  /  | l___  |  |     Y    _]l_   _j|     ||  \\_/  |    l_j  l_j |  | |  \\_/  |Y    _]|    /",
+    "/   \\_ |     T |  |     |   [_ |     ||  _  ||   |   |      |  |   |  | |   |   ||   [_ |    \\",
+    "\\     ||     | j  l     |     T|  |  ||  |  ||   |   |      |  |   j  l |   |   ||     T|  .  Y",
+    " \\____jl_____j|____j    l_____j|__j__|l__j__jl___j___j      l__j  |____jl___j___jl_____jl__j\\_j"
+};
+static const char *const number_labels[] = {"Hours", "Minutes", "Seconds"};
+static const char note_heading[] =
+    "Note [Click enter to new line, click enter twice to proceed to timer]:";
 
 static volatile sig_atomic_t interrupted;
 
@@ -48,8 +77,8 @@ static void usage(FILE *stream, const char *program)
             program, (long long)MAX_HOURS);
 }
 
-static int parse_number(const char *text, long long maximum,
-                        const char *name, long long *value)
+static bool parse_number_value(const char *text, long long maximum,
+                               long long *value)
 {
     char *end;
     long long parsed;
@@ -58,11 +87,20 @@ static int parse_number(const char *text, long long maximum,
     parsed = strtoll(text, &end, 10);
     if (errno != 0 || text == end || *end != '\0' || parsed < 0 ||
         parsed > maximum) {
+        return false;
+    }
+    *value = parsed;
+    return true;
+}
+
+static int parse_number(const char *text, long long maximum,
+                        const char *name, long long *value)
+{
+    if (!parse_number_value(text, maximum, value)) {
         fprintf(stderr, "Invalid %s '%s': expected 0-%lld.\n",
                 name, text, maximum);
         return -1;
     }
-    *value = parsed;
     return 0;
 }
 
@@ -181,15 +219,13 @@ static int prompt_number(const char *label, long long maximum, long long *value)
 
 static int prompt_notes(Config *config)
 {
-    static const char heading[] =
-        "Note [Click enter to new line, click enter twice to proceed to timer]:";
     char note[NOTE_SIZE] = "";
     char input[NOTE_LINE_SIZE];
     size_t used = 0;
     int number = 1;
     bool blank = false;
 
-    puts(heading);
+    puts(note_heading);
     for (;;) {
         printf(blank ? "   " : "%d. ", number);
         fflush(stdout);
@@ -230,17 +266,26 @@ static int prompt_notes(Config *config)
     }
 }
 
-static int total_seconds(const Config *config, long long *total)
+static const char *total_seconds_error(const Config *config, long long *total)
 {
     long long tail = config->minutes * 60 + config->seconds;
 
     if (config->hours > (MAX_SECONDS - tail) / 3600) {
-        fprintf(stderr, "Duration is too large.\n");
-        return -1;
+        return "Duration is too large.";
     }
     *total = config->hours * 3600 + tail;
     if (*total == 0) {
-        fprintf(stderr, "Total duration must be greater than zero.\n");
+        return "Total duration must be greater than zero.";
+    }
+    return NULL;
+}
+
+static int total_seconds(const Config *config, long long *total)
+{
+    const char *error = total_seconds_error(config, total);
+
+    if (error != NULL) {
+        fprintf(stderr, "%s\n", error);
         return -1;
     }
     return 0;
@@ -257,6 +302,297 @@ static int prompt_config(Config *config, long long *total)
         if (total_seconds(config, total) == 0) {
             return prompt_notes(config);
         }
+    }
+}
+
+static void draw_centered_message(int row, const char *text, int columns,
+                                  attr_t attributes)
+{
+    int length = (int)strlen(text);
+    int shown = length < columns ? length : columns;
+
+    if (row < 0 || row >= LINES || shown <= 0) {
+        return;
+    }
+    attron(attributes);
+    mvaddnstr(row, (columns - shown) / 2, text, shown);
+    attroff(attributes);
+}
+
+static void draw_text(int row, int column, const char *text, int columns)
+{
+    if (row >= 0 && row < LINES && column >= 0 && column < columns) {
+        mvaddnstr(row, column, text, columns - column);
+    }
+}
+
+static bool draw_setup(const Setup *setup)
+{
+    int rows;
+    int columns;
+    int start_y;
+    int title_x;
+    int form_x;
+    int form_y;
+    int note_y;
+    int visible_note_lines;
+    int completed_note_lines = setup->note_number - 1;
+    int skipped_note_lines;
+    int row;
+    int index;
+    int cursor_row = 0;
+    int cursor_column = 0;
+
+    getmaxyx(stdscr, rows, columns);
+    erase();
+    if (rows < SETUP_HEIGHT || columns < TITLE_WIDTH) {
+        (void)curs_set(0);
+        draw_centered_message(rows / 2 - 1, "Terminal too small.", columns,
+                              A_BOLD);
+        draw_centered_message(rows / 2, "Please resize the terminal.", columns,
+                              A_NORMAL);
+        refresh();
+        return false;
+    }
+
+    (void)curs_set(1);
+    start_y = (rows - SETUP_HEIGHT) / 2;
+    title_x = (columns - TITLE_WIDTH) / 2;
+    form_x = (columns - (int)(sizeof(note_heading) - 1)) / 2;
+    form_y = start_y + TITLE_HEIGHT + 2;
+    attron(A_BOLD);
+    for (row = 0; row < TITLE_HEIGHT; ++row) {
+        mvaddnstr(start_y + row, title_x, title[row], TITLE_WIDTH);
+    }
+    attroff(A_BOLD);
+
+    for (index = 0; index < 3; ++index) {
+        char prompt[64];
+        const char *value = setup->field == index ? setup->input :
+                            setup->entered[index];
+        int prompt_length;
+        size_t value_length = setup->field == index ? setup->input_length :
+                              strlen(value);
+        int available;
+        size_t offset = 0;
+
+        prompt_length = snprintf(prompt, sizeof(prompt),
+                                 "%s [Default=%02lld]: ", number_labels[index],
+                                 setup->defaults[index]);
+        draw_text(form_y + index, form_x, prompt, columns);
+        available = columns - form_x - prompt_length;
+        if (available > 0) {
+            if (value_length >= (size_t)available) {
+                offset = value_length - (size_t)available + 1;
+            }
+            mvaddnstr(form_y + index, form_x + prompt_length,
+                      value + offset, available - 1);
+        }
+        if (setup->field == index) {
+            cursor_row = form_y + index;
+            cursor_column = form_x + prompt_length +
+                            (int)(value_length - offset);
+        }
+    }
+
+    draw_text(form_y + 3, form_x, note_heading, columns);
+    if (setup->field == 3) {
+        const char *line = setup->note;
+        int total_note_lines = completed_note_lines + 1;
+
+        note_y = form_y + 4;
+        visible_note_lines = rows - note_y - 1;
+        skipped_note_lines = total_note_lines > visible_note_lines ?
+                             total_note_lines - visible_note_lines : 0;
+        for (index = 0; index < skipped_note_lines; ++index) {
+            line = strchr(line, '\n');
+            if (line != NULL) {
+                ++line;
+            }
+        }
+        row = note_y;
+        for (index = skipped_note_lines;
+             index < completed_note_lines && line != NULL; ++index) {
+            const char *end = strchr(line, '\n');
+            size_t length = end == NULL ? strlen(line) : (size_t)(end - line);
+
+            mvaddnstr(row++, form_x, line,
+                      length < (size_t)(columns - form_x) ? (int)length :
+                                                           columns - form_x);
+            line = end == NULL ? NULL : end + 1;
+        }
+        {
+            char prefix[32];
+            int prefix_length = setup->note_blank ?
+                                snprintf(prefix, sizeof(prefix), "   ") :
+                                snprintf(prefix, sizeof(prefix), "%d. ",
+                                         setup->note_number);
+            int available = columns - form_x - prefix_length;
+            size_t offset = 0;
+
+            draw_text(row, form_x, prefix, columns);
+            if (available > 0) {
+                if (setup->input_length >= (size_t)available) {
+                    offset = setup->input_length - (size_t)available + 1;
+                }
+                mvaddnstr(row, form_x + prefix_length,
+                          setup->input + offset, available - 1);
+            }
+            cursor_row = row;
+            cursor_column = form_x + prefix_length +
+                            (int)(setup->input_length - offset);
+        }
+    }
+
+    if (setup->message[0] != '\0') {
+        draw_centered_message(rows - 1, setup->message, columns, A_BOLD);
+    }
+    move(cursor_row, cursor_column);
+    refresh();
+    return true;
+}
+
+static int read_setup_line(Setup *setup, char *input, size_t maximum)
+{
+    size_t length = 0;
+    size_t overflow = 0;
+
+    input[0] = '\0';
+    for (;;) {
+        int key;
+        bool fits;
+
+        setup->input = input;
+        setup->input_length = length;
+        fits = draw_setup(setup);
+        key = getch();
+        if (interrupted) {
+            return -1;
+        }
+        if (key == ERR || key == KEY_RESIZE) {
+            continue;
+        }
+        if (!fits) {
+            continue;
+        }
+        if (key == '\n' || key == '\r' || key == KEY_ENTER) {
+            return overflow == 0 ? 0 : 1;
+        }
+        if (key == KEY_BACKSPACE || key == 127 || key == '\b') {
+            if (overflow > 0) {
+                --overflow;
+            } else if (length > 0) {
+                input[--length] = '\0';
+            }
+        } else if (key == 21) {
+            length = overflow = 0;
+            input[0] = '\0';
+        } else if (key >= ' ' && key <= UCHAR_MAX && key != 127) {
+            if (length < maximum) {
+                input[length++] = (char)key;
+                input[length] = '\0';
+            } else {
+                ++overflow;
+            }
+        }
+    }
+}
+
+static int prompt_config_screen(Config *config, long long *total)
+{
+    static const long long maximums[] = {MAX_HOURS, 59, 59};
+    long long *values[] = {&config->hours, &config->minutes, &config->seconds};
+    Setup setup = {.note_number = 1};
+    int index;
+
+    timeout(100);
+    for (;;) {
+        setup.defaults[0] = config->hours;
+        setup.defaults[1] = config->minutes;
+        setup.defaults[2] = config->seconds;
+        memset(setup.entered, 0, sizeof(setup.entered));
+
+        for (index = 0; index < 3; ++index) {
+            char input[64];
+
+            setup.field = index;
+            for (;;) {
+                long long parsed;
+                int input_result = read_setup_line(&setup, input,
+                                                   sizeof(input) - 2);
+
+                if (input_result == -1) {
+                    return -1;
+                }
+                if (input_result == 1) {
+                    (void)snprintf(setup.message, sizeof(setup.message),
+                                   "Input is too long.");
+                    continue;
+                }
+                if (input[0] == '\0') {
+                    setup.message[0] = '\0';
+                    break;
+                }
+                if (parse_number_value(input, maximums[index], &parsed)) {
+                    *values[index] = parsed;
+                    memcpy(setup.entered[index], input, strlen(input) + 1);
+                    setup.message[0] = '\0';
+                    break;
+                }
+                (void)snprintf(setup.message, sizeof(setup.message),
+                               "Invalid %s '%s': expected 0-%lld.",
+                               number_labels[index], input, maximums[index]);
+            }
+        }
+        {
+            const char *error = total_seconds_error(config, total);
+
+            if (error == NULL) {
+                break;
+            }
+            (void)snprintf(setup.message, sizeof(setup.message), "%s", error);
+        }
+    }
+
+    setup.field = 3;
+    for (;;) {
+        char input[NOTE_LINE_SIZE];
+        int input_result = read_setup_line(&setup, input,
+                                           sizeof(input) - 2);
+
+        if (input_result == -1) {
+            return -1;
+        }
+        if (input_result == 1) {
+            (void)snprintf(setup.message, sizeof(setup.message),
+                           "Note line is too long (maximum %d bytes).",
+                           NOTE_LINE_SIZE - 2);
+            continue;
+        }
+        if (input[0] == '\0') {
+            if (setup.note_blank) {
+                memcpy(config->note, setup.note, strlen(setup.note) + 1);
+                nodelay(stdscr, TRUE);
+                (void)curs_set(0);
+                return 0;
+            }
+            setup.note_blank = true;
+            continue;
+        }
+
+        setup.note_blank = false;
+        {
+            size_t used = strlen(setup.note);
+            int written = snprintf(setup.note + used, NOTE_SIZE - used,
+                                   "%s%d. %s", used == 0 ? "" : "\n",
+                                   setup.note_number, input);
+
+            if (written < 0 || (size_t)written >= NOTE_SIZE - used) {
+                return -2;
+            }
+        }
+        setup.message[0] = '\0';
+        ++setup.note_number;
     }
 }
 
@@ -279,14 +615,14 @@ int main(int argc, char **argv)
     Timer timer;
     bool quit = false;
     bool bell_rung = false;
+    bool display_ready = false;
     int result;
 
     result = parse_arguments(argc, argv, &config);
     if (result != 0) {
         return result > 0 ? EXIT_SUCCESS : EXIT_FAILURE;
     }
-    if (argc == 1 ? prompt_config(&config, &duration) == -1 :
-                    total_seconds(&config, &duration) == -1) {
+    if (argc != 1 && total_seconds(&config, &duration) == -1) {
         return EXIT_FAILURE;
     }
     if (clock_gettime(CLOCK_MONOTONIC, &clock_check) == -1) {
@@ -297,7 +633,25 @@ int main(int argc, char **argv)
         perror("sigaction");
         return EXIT_FAILURE;
     }
-    if (display_init() == -1) {
+    if (argc == 1 && isatty(STDIN_FILENO) && isatty(STDOUT_FILENO)) {
+        if (display_init() == -1) {
+            fprintf(stderr, "Could not initialize ncurses.\n");
+            return EXIT_FAILURE;
+        }
+        display_ready = true;
+        result = prompt_config_screen(&config, &duration);
+        if (result != 0) {
+            display_shutdown();
+            if (result == -2) {
+                fprintf(stderr, "Notes are too long (maximum %d bytes).\n",
+                        NOTE_SIZE - 1);
+            }
+            return EXIT_FAILURE;
+        }
+    } else if (argc == 1 && prompt_config(&config, &duration) == -1) {
+        return EXIT_FAILURE;
+    }
+    if (!display_ready && display_init() == -1) {
         fprintf(stderr, "Could not initialize ncurses.\n");
         return EXIT_FAILURE;
     }
