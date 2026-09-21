@@ -258,7 +258,8 @@ int display_init(void)
 
 void display_draw(Timer *timer, const char *note)
 {
-    static const char controls[] = "[SPACE/P] Pause   [R] Reset   [Q] Quit";
+    static const char controls[] =
+        "[SPACE/P] Pause   [E] Edit note   [R] Reset   [Q] Quit";
     long long remaining = timer_remaining_seconds(timer);
     long long hours = remaining / 3600;
     int minutes = (int)(remaining / 60 % 60);
