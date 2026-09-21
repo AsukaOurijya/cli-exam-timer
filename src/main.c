@@ -22,7 +22,7 @@
 #define MAX_HOURS (MAX_SECONDS / 3600)
 #define TITLE_HEIGHT 7
 #define TITLE_WIDTH 95
-#define SETUP_HEIGHT (TITLE_HEIGHT + 8)
+#define SETUP_HEIGHT (TITLE_HEIGHT + 10)
 
 typedef struct {
     long long hours;
@@ -38,6 +38,7 @@ typedef struct {
     char note[NOTE_SIZE];
     int note_number;
     bool note_blank;
+    char note_choice;
     const char *input;
     size_t input_length;
     char message[NOTE_LINE_SIZE + 80];
@@ -55,6 +56,8 @@ static const char title[TITLE_HEIGHT][TITLE_WIDTH + 1] = {
 static const char *const number_labels[] = {"Hours", "Minutes", "Seconds"};
 static const char note_heading[] =
     "Note [Click enter to new line, click enter twice to proceed to timer]:";
+static const char note_question[] =
+    "Would you like to add additional notes? (y/n)?";
 
 static volatile sig_atomic_t interrupted;
 
@@ -300,7 +303,27 @@ static int prompt_config(Config *config, long long *total)
             return -1;
         }
         if (total_seconds(config, total) == 0) {
-            return prompt_notes(config);
+            char input[64];
+
+            for (;;) {
+                puts(note_question);
+                if (fgets(input, sizeof(input), stdin) == NULL) {
+                    fputc('\n', stderr);
+                    return -1;
+                }
+                if (strchr(input, '\n') == NULL) {
+                    discard_line();
+                } else {
+                    input[strcspn(input, "\n")] = '\0';
+                    if (strcmp(input, "y") == 0 || strcmp(input, "Y") == 0) {
+                        return prompt_notes(config);
+                    }
+                    if (strcmp(input, "n") == 0 || strcmp(input, "N") == 0) {
+                        return 0;
+                    }
+                }
+                fprintf(stderr, "Please enter y or n.\n");
+            }
         }
     }
 }
@@ -395,12 +418,19 @@ static bool draw_setup(const Setup *setup)
         }
     }
 
-    draw_text(form_y + 3, form_x, note_heading, columns);
+    draw_text(form_y + 3, form_x, note_question, columns);
     if (setup->field == 3) {
+        draw_text(form_y + 4, form_x, setup->input, columns);
+        cursor_row = form_y + 4;
+        cursor_column = form_x + (int)setup->input_length;
+    } else if (setup->field == 4) {
         const char *line = setup->note;
         int total_note_lines = completed_note_lines + 1;
+        char choice[] = {setup->note_choice, '\0'};
 
-        note_y = form_y + 4;
+        draw_text(form_y + 4, form_x, choice, columns);
+        draw_text(form_y + 5, form_x, note_heading, columns);
+        note_y = form_y + 6;
         visible_note_lines = rows - note_y - 1;
         skipped_note_lines = total_note_lines > visible_note_lines ?
                              total_note_lines - visible_note_lines : 0;
@@ -556,6 +586,28 @@ static int prompt_config_screen(Config *config, long long *total)
 
     setup.field = 3;
     for (;;) {
+        char input[2];
+        int input_result = read_setup_line(&setup, input, sizeof(input) - 1);
+
+        if (input_result == -1) {
+            return -1;
+        }
+        if (input_result == 0 && (input[0] == 'y' || input[0] == 'Y') &&
+            input[1] == '\0') {
+            setup.note_choice = input[0];
+            setup.message[0] = '\0';
+            break;
+        }
+        if (input_result == 0 && (input[0] == 'n' || input[0] == 'N') &&
+            input[1] == '\0') {
+            goto done;
+        }
+        (void)snprintf(setup.message, sizeof(setup.message),
+                       "Please enter y or n.");
+    }
+
+    setup.field = 4;
+    for (;;) {
         char input[NOTE_LINE_SIZE];
         int input_result = read_setup_line(&setup, input,
                                            sizeof(input) - 2);
@@ -572,9 +624,7 @@ static int prompt_config_screen(Config *config, long long *total)
         if (input[0] == '\0') {
             if (setup.note_blank) {
                 memcpy(config->note, setup.note, strlen(setup.note) + 1);
-                nodelay(stdscr, TRUE);
-                (void)curs_set(0);
-                return 0;
+                break;
             }
             setup.note_blank = true;
             continue;
@@ -594,6 +644,11 @@ static int prompt_config_screen(Config *config, long long *total)
         setup.message[0] = '\0';
         ++setup.note_number;
     }
+
+done:
+    nodelay(stdscr, TRUE);
+    (void)curs_set(0);
+    return 0;
 }
 
 static int install_signal_handlers(void)
